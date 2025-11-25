@@ -265,15 +265,6 @@ def load_entity(
 ) -> Dict[str, int]:
     """
     Load a list of records into a Snowflake table using the provided loader.
-
-    Args:
-        schema: Column -> Snowflake type mapping.
-        records: List of rows to load.
-        table: Table name (without db/schema).
-        loader: Injectable loader function for easier testing.
-
-    Returns:
-        Loader statistics.
     """
     if not records:
         logger.warning("No records to load for table %s", table)
