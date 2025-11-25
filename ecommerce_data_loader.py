@@ -1,7 +1,7 @@
 import os
 import logging
 from datetime import datetime, timezone
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Callable
 import requests
 
 # -------------------------------------------------------------------
@@ -9,8 +9,8 @@ import requests
 # from snowflake_loader import load_to_snowflake
 # -------------------------------------------------------------------
 def load_to_snowflake(
-    schema: dict,
-    records: List[dict],
+    schema: Dict[str, str],
+    records: List[Dict[str, Any]],
     database: str,
     schema_name: str,
     table: str
@@ -25,10 +25,14 @@ def load_to_snowflake(
 # Configuration
 # -------------------------------------------------------------------
 
-API_BASE_URL = os.getenv("API_BASE_URL", "https://myshop.com")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://myshop.com").rstrip("/")
 SNOWFLAKE_DATABASE = os.getenv("SNOWFLAKE_DATABASE", "RAW")
 SNOWFLAKE_SCHEMA = os.getenv("SNOWFLAKE_SCHEMA", "ECOMMERCE")
 PIPELINE_SOURCE = os.getenv("PIPELINE_SOURCE", "myshop_rest_api")
+
+# Pagination / HTTP config
+API_PAGE_SIZE = int(os.getenv("API_PAGE_SIZE", "100"))  # 100 per spec
+API_TIMEOUT_SECONDS = int(os.getenv("API_TIMEOUT_SECONDS", "30"))
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
@@ -100,23 +104,25 @@ class ApiError(Exception):
 
 
 def current_loaded_at_iso() -> str:
-    """Returns current UTC timestamp in ISO 8601 with Z."""
+    """
+    Returns current UTC timestamp in ISO 8601 format with timezone offset
+    (e.g. '2024-01-01T00:00:00+00:00').
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
-def fetch_paginated(endpoint: str, params: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+def fetch_paginated(
+    endpoint: str,
+    params: Dict[str, Any] = None,
+    http_get: Callable[..., requests.Response] = requests.get
+) -> List[Dict[str, Any]]:
     """
     Fetch all pages for a given endpoint.
-
-    Args:
-        endpoint: API endpoint path (e.g., "/api/customers").
-        params: Query params for the request (page will be injected/overridden).
-
-    Returns:
-        List of records (dictionaries) combined from all pages.
     """
     if params is None:
         params = {}
+    # Ensure per_page is explicitly set as per spec / env
+    params.setdefault("per_page", API_PAGE_SIZE)
 
     records: List[Dict[str, Any]] = []
     page = 1
@@ -132,7 +138,7 @@ def fetch_paginated(endpoint: str, params: Dict[str, Any] = None) -> List[Dict[s
         logger.debug("Requesting URL: %s with params: %s", url, params_with_page)
 
         try:
-            response = requests.get(url, params=params_with_page, timeout=30)
+            response = http_get(url, params=params_with_page, timeout=API_TIMEOUT_SECONDS)
         except requests.RequestException as exc:
             logger.error("HTTP request to %s failed: %s", url, exc)
             raise ApiError(f"HTTP request failed: {exc}") from exc
@@ -254,7 +260,8 @@ def transform_order_line_items(raw_olis: List[Dict[str, Any]]) -> List[Dict[str,
 def load_entity(
     schema: Dict[str, str],
     records: List[Dict[str, Any]],
-    table: str
+    table: str,
+    loader: Callable[[Dict[str, str], List[Dict[str, Any]], str, str, str], Dict[str, int]] = load_to_snowflake
 ) -> Dict[str, int]:
     """
     Load a list of records into a Snowflake table using the provided loader.
@@ -263,6 +270,7 @@ def load_entity(
         schema: Column -> Snowflake type mapping.
         records: List of rows to load.
         table: Table name (without db/schema).
+        loader: Injectable loader function for easier testing.
 
     Returns:
         Loader statistics.
@@ -279,7 +287,7 @@ def load_entity(
         table
     )
 
-    stats = load_to_snowflake(
+    stats = loader(
         schema,
         records,
         SNOWFLAKE_DATABASE,
@@ -297,7 +305,6 @@ def load_entity(
 
 
 def run_pipeline() -> None:
-    """Orchestrates the full extract → transform → load pipeline."""
     logger.info("Starting e-commerce data pipeline")
 
     # Customers
